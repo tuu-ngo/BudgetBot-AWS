@@ -29,8 +29,11 @@ def handle_chat(
         context_messages.append({"role": "user",      "content": entry["input"]})
         context_messages.append({"role": "assistant", "content": entry["output"]})
 
-    # 2. Recent transactions as spending context (last 90 days or specified month)
+    # 2. Spending context: use the requested month if given, otherwise cap at the
+    #    200 most-recent transactions to prevent context-window overflow (FP-10).
     transactions = userstore.list_transactions(user_id, month=month)
+    if not month:
+        transactions = transactions[:200]
 
     # 3. Call AI
     try:

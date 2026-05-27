@@ -17,20 +17,11 @@ Interface (grouped by table):
 """
 
 import uuid
-from datetime import datetime, timezone
 
-
-VALID_CATEGORIES = [
-    "Food", "Transport", "Shopping", "Utilities", "Entertainment",
-    "Health", "Subscriptions", "Bills", "Income", "Transfer", "Other",
-]
+from src.constants import CATEGORIES as VALID_CATEGORIES
 
 VALID_FILE_STATUSES   = ("pending", "processing", "done", "error")
 VALID_REVIEW_STATUSES = ("ok", "review")
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _to_uuid(user_id: str) -> str:
@@ -191,7 +182,8 @@ class PostgresUserStore:
             return {"user_id": str(row[0]), "account": row[1], "budget": row[2]}
 
     def get_user_by_id(self, user_id: str) -> dict | None:
-        uid = self._ensure_user(user_id)
+        # FP-3: pure lookup — do NOT auto-provision; unknown UUID must return None → 404
+        uid = _to_uuid(user_id)
         with self.conn.cursor() as cur:
             cur.execute(
                 'SELECT user_id, account, password, budget FROM "user" WHERE user_id = %s',
@@ -214,7 +206,8 @@ class PostgresUserStore:
             return {"user_id": str(row[0]), "account": row[1], "password": row[2], "budget": row[3]}
 
     def update_user(self, user_id: str, **fields) -> dict | None:
-        uid = self._ensure_user(user_id)
+        # FP-3: do NOT auto-provision; updating a non-existent user must return None → 404
+        uid = _to_uuid(user_id)
         allowed = {"account", "password", "budget"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -285,7 +278,7 @@ class PostgresUserStore:
             return cur.rowcount > 0
 
     def list_files(self, user_id: str) -> list:
-        uid = self._ensure_user(user_id)
+        uid = _to_uuid(user_id)  # FP-3: read-only, no auto-provision
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT file_id, user_id, file_name, time_upload, status "
@@ -347,7 +340,7 @@ class PostgresUserStore:
 
     def list_transactions(self, user_id: str, month: str | None = None,
                           review_status: str | None = None) -> list:
-        uid = self._ensure_user(user_id)
+        uid = _to_uuid(user_id)  # FP-3: read-only, no auto-provision
         sql = (
             "SELECT t.transaction_id, t.file_id, t.time, t.description, "
             "       t.amount, t.confident, t.category, t.review_status "
@@ -388,7 +381,7 @@ class PostgresUserStore:
 
     def summary(self, user_id: str, month: str | None = None) -> dict:
         """Aggregate spending by category. Returns {category: {total, count}}."""
-        uid = self._ensure_user(user_id)
+        uid = _to_uuid(user_id)  # FP-3: read-only, no auto-provision
         sql = (
             "SELECT t.category, SUM(t.amount), COUNT(*) "
             "FROM transaction t JOIN file f ON t.file_id = f.file_id "
@@ -404,11 +397,20 @@ class PostgresUserStore:
             return {r[0]: {"total": int(r[1]), "count": int(r[2])} for r in cur.fetchall()}
 
     def spending_this_month(self, user_id: str) -> dict:
-        """Convenience: summary for the current calendar month (absolute values, expenses only)."""
+        """Current-month spending totals (absolute values, expenses only).
+
+        FP-4: Transfer and Income are excluded — a transfer to savings has a
+        negative amount but should not count as spending for budget cap purposes.
+        """
         from datetime import date
+        _EXCLUDED = {"Transfer", "Income"}
         month = date.today().strftime("%Y-%m")
         raw = self.summary(user_id, month=month)
-        return {cat: abs(v["total"]) for cat, v in raw.items() if v["total"] < 0}
+        return {
+            cat: abs(v["total"])
+            for cat, v in raw.items()
+            if v["total"] < 0 and cat not in _EXCLUDED
+        }
 
     # =========================================================================
     # Chat history
@@ -433,7 +435,7 @@ class PostgresUserStore:
             }
 
     def get_chat_history(self, user_id: str, limit: int = 50) -> list:
-        uid = self._ensure_user(user_id)
+        uid = _to_uuid(user_id)  # FP-3: read-only, no auto-provision
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT chat_history_id, user_id, input, output, time "
@@ -465,6 +467,8 @@ class PostgresUserStore:
         """Create or update a budget cap for a category (upsert)."""
         if category not in VALID_CATEGORIES:
             raise ValueError(f"Invalid category: {category!r}")
+        if cap_amount <= 0:
+            raise ValueError(f"cap_amount must be positive, got {cap_amount}")
         uid = self._ensure_user(user_id)
         with self.conn.cursor() as cur:
             cur.execute(
@@ -483,7 +487,7 @@ class PostgresUserStore:
             }
 
     def get_budget_caps(self, user_id: str) -> list:
-        uid = self._ensure_user(user_id)
+        uid = _to_uuid(user_id)  # FP-3: read-only, no auto-provision
         with self.conn.cursor() as cur:
             cur.execute(
                 "SELECT cap_id, user_id, category, cap_amount "

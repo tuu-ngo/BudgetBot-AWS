@@ -20,19 +20,50 @@ logger = logging.getLogger(__name__)
 # CSV parsing (shared between local-flow inline and parser lambda)
 # =============================================================================
 
+def _to_float(s: str) -> float:
+    return float(s.strip().replace(",", "") or "0")
+
+
 def parse_csv(data: bytes) -> list[dict]:
-    """Parse a bank-statement CSV into a list of {date, description, amount} dicts."""
+    """Parse a bank-statement CSV into a list of {date, description, amount} dicts.
+
+    Supported layouts:
+    1. Header row with 'date' + 'amount' columns.
+    2. Header row with 'date' + 'debit'/'credit' columns (VN bank export style).
+    3. No header, 3-column: date, description, amount (negative=expense).
+    4. FP-8: No header, 4+ columns: date, description, debit, credit[, balance].
+       Computes amount = credit - debit (debit positive → expense negative result).
+    """
     text = data.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(text))
     rows = list(reader)
     if not rows:
         return []
+
     header = [c.lower().strip() for c in rows[0]]
+    use_debit_credit = False
+
     if "date" in header and "amount" in header:
         idx = {col: i for i, col in enumerate(header)}
         data_rows = rows[1:]
+    elif "date" in header and ("debit" in header or "credit" in header):
+        idx = {col: i for i, col in enumerate(header)}
+        use_debit_credit = True
+        data_rows = rows[1:]
     else:
-        idx = {"date": 0, "description": 1, "amount": 2}
+        # No header — peek at the first non-empty row to guess column layout
+        first = next((r for r in rows if any(c.strip() for c in r)), None)
+        if first and len(first) >= 4:
+            # Try interpreting col 2 and col 3 as debit/credit (both must be numeric)
+            try:
+                _to_float(first[2])
+                _to_float(first[3])
+                use_debit_credit = True
+                idx = {"date": 0, "description": 1, "debit": 2, "credit": 3}
+            except ValueError:
+                idx = {"date": 0, "description": 1, "amount": 2}
+        else:
+            idx = {"date": 0, "description": 1, "amount": 2}
         data_rows = rows
 
     parsed = []
@@ -40,10 +71,16 @@ def parse_csv(data: bytes) -> list[dict]:
         if len(r) < 3 or not r[idx.get("date", 0)].strip():
             continue
         try:
+            if use_debit_credit:
+                debit  = _to_float(r[idx.get("debit",  2)])
+                credit = _to_float(r[idx.get("credit", 3)])
+                amount = int(credit - debit)
+            else:
+                amount = int(_to_float(r[idx.get("amount", 2)]))
             parsed.append({
                 "date":        r[idx.get("date", 0)].strip(),
                 "description": r[idx.get("description", 1)].strip(),
-                "amount":      int(float(r[idx.get("amount", 2)].strip().replace(",", ""))),
+                "amount":      amount,
             })
         except (ValueError, IndexError):
             continue

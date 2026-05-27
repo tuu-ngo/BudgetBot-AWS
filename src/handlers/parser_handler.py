@@ -16,7 +16,6 @@ Flow per SQS message:
 """
 import json
 import logging
-from typing import Optional
 
 from src.config import config
 

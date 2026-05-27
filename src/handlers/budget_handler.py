@@ -5,7 +5,7 @@ Triggered by: Lambda Parser (async invoke) after writing transactions.
 Flow:
     1. Get user's budget caps from RDS
     2. Query current-month spending per category from RDS
-    3. For each cap: if |spending| >= cap_amount → publish SNS alert
+    3. For each cap: if |spending| > cap_amount → publish SNS alert (= cap_amount → status "reached", no alert)
     4. Return summary of alerts sent
 
 Local mode: SNS publish is skipped if SNS_TOPIC_ARN is not set (logs warning).
@@ -39,7 +39,7 @@ def check_and_alert(user_id: str, userstore) -> dict:
         spent      = spending.get(category, 0)
 
         status = "ok"
-        if spent >= cap_amount:
+        if spent > cap_amount:
             status = "exceeded"
             pct = int(spent / cap_amount * 100)
             sent = _send_sns_alert(
@@ -51,6 +51,8 @@ def check_and_alert(user_id: str, userstore) -> dict:
             )
             if sent:
                 alerts_sent += 1
+        elif spent == cap_amount and cap_amount > 0:
+            status = "reached"
 
         details.append({
             "category":   category,
@@ -95,7 +97,8 @@ def _send_sns_alert(
     try:
         import boto3
         sns = boto3.client("sns", region_name=config.aws_region)
-        subject = f"[BudgetBot] {category} budget exceeded ({pct}%)"
+        verb = "reached" if pct == 100 else "exceeded"
+        subject = f"[BudgetBot] {category} budget {verb} ({pct}%)"
         message = (
             f"BudgetBot Alert\n"
             f"User:     {user_id}\n"
