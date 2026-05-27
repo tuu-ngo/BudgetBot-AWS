@@ -1,4 +1,10 @@
-"""FastAPI app for BudgetBot. Runtime-agnostic. PostgreSQL enabled."""
+"""BudgetBot — FastAPI application.
+
+Local dev:  uvicorn src.app:app --reload --port 8000
+Lambda:     imported by src/lambdas/lambda_api.py and lambda_chat.py (via Mangum)
+
+This file is a thin router. All business logic lives in src/handlers/.
+"""
 from pathlib import Path
 from typing import Optional
 
@@ -9,50 +15,59 @@ from pydantic import BaseModel
 
 from src.config import config
 from src.adapters import factory
-from src import handlers
+from src.handlers import api_handler, chat_handler, budget_handler
 
+app = FastAPI(title="BudgetBot — AI Money Coach")
 
-app = FastAPI(title="BudgetBot — W7 Capstone Starter")
-
-
-# CORS — allow frontend to live on a different origin (CloudFront / Amplify / separate ALB).
-# CORS_ORIGINS env var controls this; default '*' is permissive for hackathon.
-_allowed = ["*"] if config.cors_origins == "*" else [o.strip() for o in config.cors_origins.split(",") if o.strip()]
+_origins = (
+    ["*"] if config.cors_origins == "*"
+    else [o.strip() for o in config.cors_origins.split(",") if o.strip()]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed,
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Adapters — initialised once at startup
 ai_client = factory.make_ai()
-storage = factory.make_storage()
-userstore = factory.make_userstore()
+storage    = factory.make_storage()
+userstore  = factory.make_userstore()
 
 
-def _resolve_user_id(x_user_id: Optional[str]) -> str:
+def _uid(x_user_id: Optional[str]) -> str:
     return x_user_id or config.default_user_id
 
 
 # =============================================================================
-# Pydantic models for request bodies
+# Pydantic request bodies
 # =============================================================================
 
 class UserCreate(BaseModel):
-    account: str
+    account:  str
     password: str
-    budget: int = 0
+    budget:   int = 0
 
 
 class UserUpdate(BaseModel):
-    account: Optional[str] = None
+    account:  Optional[str] = None
     password: Optional[str] = None
-    budget: Optional[int] = None
+    budget:   Optional[int] = None
 
 
 class ChatRequest(BaseModel):
     message: str
+    month:   Optional[str] = None  # optional month filter for spending context
+
+
+class CategoryUpdate(BaseModel):
+    category: str
+
+
+class BudgetCapBody(BaseModel):
+    cap_amount: int
 
 
 # =============================================================================
@@ -63,9 +78,11 @@ class ChatRequest(BaseModel):
 def health() -> dict:
     return {
         "status": "ok",
+        "flow_mode": config.flow_mode,
         "backends": {
-            "ai": config.ai_backend,
-            "storage": "postgres",
+            "ai":      config.ai_backend,
+            "storage": config.storage_backend,
+            "db":      "postgres",
         },
     }
 
@@ -74,15 +91,10 @@ def health() -> dict:
 # User CRUD
 # =============================================================================
 
-@app.post("/users")
+@app.post("/users", status_code=201)
 def create_user(body: UserCreate) -> dict:
-    """Create a new user."""
     try:
-        user = userstore.create_user(
-            account=body.account,
-            password=body.password,
-            budget=body.budget,
-        )
+        user = userstore.create_user(account=body.account, password=body.password, budget=body.budget)
         return {"status": "created", "user": user}
     except Exception as e:
         if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
@@ -92,18 +104,15 @@ def create_user(body: UserCreate) -> dict:
 
 @app.get("/users/{user_id}")
 def get_user(user_id: str) -> dict:
-    """Get user by ID."""
     user = userstore.get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    # Don't expose password in GET response
     user.pop("password", None)
     return {"user": user}
 
 
 @app.put("/users/{user_id}")
 def update_user(user_id: str, body: UserUpdate) -> dict:
-    """Update user fields."""
     updates = body.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -115,7 +124,6 @@ def update_user(user_id: str, body: UserUpdate) -> dict:
 
 @app.delete("/users/{user_id}")
 def delete_user(user_id: str) -> dict:
-    """Delete a user and all associated data (cascade)."""
     deleted = userstore.delete_user(user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="User not found")
@@ -123,7 +131,7 @@ def delete_user(user_id: str) -> dict:
 
 
 # =============================================================================
-# File upload + transaction processing
+# Upload + file status
 # =============================================================================
 
 @app.post("/upload")
@@ -131,22 +139,38 @@ async def upload(
     file: UploadFile = File(...),
     x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
-    user_id = _resolve_user_id(x_user_id)
+    """
+    FLOW_MODE=local  → processes inline, returns categorized results immediately.
+    FLOW_MODE=aws    → returns {presigned_url, file_id}; parsing happens async via SQS.
+    """
+    user_id = _uid(x_user_id)
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
-    return handlers.handle_upload(
-        user_id=user_id,
-        filename=file.filename or "statement.csv",
-        data=data,
-        ai_client=ai_client,
-        storage=storage,
-        userstore=userstore,
-    )
+    try:
+        return api_handler.handle_upload(
+            user_id=user_id,
+            filename=file.filename or "statement.csv",
+            data=data,
+            storage=storage,
+            userstore=userstore,
+            ai_client=ai_client,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/upload/{file_id}/status")
+def file_status(file_id: str) -> dict:
+    """Poll processing status for a file (useful in aws flow_mode)."""
+    result = api_handler.handle_file_status(file_id, userstore)
+    if not result:
+        raise HTTPException(status_code=404, detail="File not found")
+    return result
 
 
 # =============================================================================
-# Transactions & Summary
+# Summary & Transactions
 # =============================================================================
 
 @app.get("/summary")
@@ -154,16 +178,37 @@ def summary(
     month: Optional[str] = None,
     x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
-    """`month` format: YYYY-MM. Omit for all-time summary."""
-    return handlers.handle_summary(_resolve_user_id(x_user_id), month, userstore)
+    return api_handler.handle_summary(_uid(x_user_id), month, userstore)
 
 
 @app.get("/transactions")
 def transactions(
-    month: Optional[str] = None,
+    month:         Optional[str] = None,
+    review_status: Optional[str] = None,
+    x_user_id:     Optional[str] = Header(default=None),
+) -> dict:
+    return api_handler.handle_list_transactions(
+        _uid(x_user_id), month, userstore, review_status=review_status
+    )
+
+
+@app.get("/transactions/review")
+def review_queue(x_user_id: Optional[str] = Header(default=None)) -> dict:
+    """Transactions with low AI confidence that need human review."""
+    return api_handler.handle_review_queue(_uid(x_user_id), userstore)
+
+
+@app.patch("/transactions/{transaction_id}/category")
+def update_category(
+    transaction_id: str,
+    body: CategoryUpdate,
     x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
-    return handlers.handle_list_transactions(_resolve_user_id(x_user_id), month, userstore)
+    """User manually corrects a transaction category."""
+    result = api_handler.handle_update_category(transaction_id, body.category, userstore)
+    if not result:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return result
 
 
 # =============================================================================
@@ -171,17 +216,42 @@ def transactions(
 # =============================================================================
 
 @app.get("/files")
-def list_files(
-    x_user_id: Optional[str] = Header(default=None),
-) -> dict:
-    """List all uploaded files for a user."""
-    user_id = _resolve_user_id(x_user_id)
-    files = userstore.list_files(user_id)
-    return {"user_id": user_id, "files": files}
+def list_files(x_user_id: Optional[str] = Header(default=None)) -> dict:
+    uid = _uid(x_user_id)
+    return {"user_id": uid, "files": userstore.list_files(uid)}
 
 
 # =============================================================================
-# Chat
+# Budget caps
+# =============================================================================
+
+@app.get("/budget-caps")
+def get_caps(x_user_id: Optional[str] = Header(default=None)) -> dict:
+    return api_handler.handle_get_caps(_uid(x_user_id), userstore)
+
+
+@app.put("/budget-caps/{category}")
+def set_cap(
+    category: str,
+    body: BudgetCapBody,
+    x_user_id: Optional[str] = Header(default=None),
+) -> dict:
+    try:
+        return api_handler.handle_set_cap(_uid(x_user_id), category, body.cap_amount, userstore)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/budget-caps/{category}")
+def delete_cap(
+    category: str,
+    x_user_id: Optional[str] = Header(default=None),
+) -> dict:
+    return api_handler.handle_delete_cap(_uid(x_user_id), category, userstore)
+
+
+# =============================================================================
+# Chat (Lambda 3 in AWS; same app locally)
 # =============================================================================
 
 @app.post("/chat")
@@ -189,35 +259,43 @@ def chat(
     body: ChatRequest,
     x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
-    """Send a chat message and get an AI response. Saves to chat_history."""
-    user_id = _resolve_user_id(x_user_id)
+    user_id = _uid(x_user_id)
     if not body.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
-    return handlers.handle_chat(
+    return chat_handler.handle_chat(
         user_id=user_id,
         input_text=body.message,
         ai_client=ai_client,
         userstore=userstore,
+        month=body.month,
     )
 
 
 @app.get("/chat/history")
 def chat_history(
-    limit: int = 50,
+    limit:     int = 50,
     x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
-    """Retrieve chat history for a user."""
-    user_id = _resolve_user_id(x_user_id)
-    return handlers.handle_get_chat_history(user_id, limit, userstore)
+    return chat_handler.handle_get_chat_history(_uid(x_user_id), limit, userstore)
 
 
-# ---- Static frontend ----
+# =============================================================================
+# Budget check endpoint (for manual trigger / testing)
+# =============================================================================
+
+@app.post("/budget/check")
+def budget_check(x_user_id: Optional[str] = Header(default=None)) -> dict:
+    """Manually trigger a budget cap check (useful for local testing)."""
+    return budget_handler.check_and_alert(_uid(x_user_id), userstore)
+
+
+# =============================================================================
+# Static frontend (disabled when deploying frontend separately)
+# =============================================================================
+
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-
 
 if config.serve_frontend:
     @app.get("/")
     def index() -> FileResponse:
-        """Convenience: serves frontend/index.html at /. Set SERVE_FRONTEND=false
-        if you deploy the frontend separately (CloudFront+S3, Amplify, ALB)."""
         return FileResponse(FRONTEND_DIR / "index.html")
