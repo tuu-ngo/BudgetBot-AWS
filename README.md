@@ -1,72 +1,229 @@
-# BudgetBot — W7 Capstone Starter
+# BudgetBot — AI Money Coach
 
-**Domain:** FinTech. Upload bank statement CSV → AI categorizes each transaction → spending summary by category.
-
-Runs **fully locally** with rule-based categorization stub. Flip env vars to use Bedrock Haiku in production.
+**Domain:** FinTech. Upload a bank statement CSV → AI categorizes each transaction → spending summary by category + AI chat coach.
 
 ---
 
-## Run locally (2 minutes)
+## Architecture overview
+
+
+
+**AI adapters** — swap via env var, no code change:
+
+
+| `AI_BACKEND` | Description                                                |
+| ------------ | ---------------------------------------------------------- |
+| `local`      | Keyword-based rule matching, no AWS call. Default for dev. |
+| `bedrock`    | AWS Bedrock `Converse` API with Claude 3.5 Haiku.          |
+
+
+**Storage adapters:**
+
+
+| `STORAGE_BACKEND` | Description                                         |
+| ----------------- | --------------------------------------------------- |
+| `local`           | Saves files to local filesystem (`_data/uploads/`). |
+| `s3`              | Saves to S3 bucket. Required in `aws` flow mode.    |
+
+
+**Database:** PostgreSQL only (local Docker or RDS in AWS).
+
+---
+
+## Run locally
+
+### 1. Start PostgreSQL
 
 ```bash
-python3 -m venv .venv
+docker volume create c258ad4d2fa2438d3119648e6d0428693d835a2e6ade584507b6187dd92cfb98
+docker compose up -d
+```
+
+Apply the schema:
+
+```bash
+psql postgresql://postgres:postgres@localhost:5432/budgetbot -f sql/init_db.sql
+```
+
+### 2. Install dependencies and start the server
+
+```bash
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
 source .venv/bin/activate
+
 pip install -r requirements.txt
 
 cp .env.example .env
 uvicorn src.app:app --reload --port 8000
-
-# In another terminal:
-curl http://localhost:8000/health
-open http://localhost:8000
-
-# End-to-end smoke:
-curl -X POST http://localhost:8000/upload \
-  -H "X-User-Id: alice" \
-  -F "file=@sample_data/sample_statement.csv"
-
-curl "http://localhost:8000/summary?month=2026-05" \
-  -H "X-User-Id: alice"
 ```
 
-Run tests:
+### 3. Verify
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Open the web UI
+open http://localhost:8000        # macOS
+start http://localhost:8000       # Windows
+```
+
+### 4. End-to-end smoke test
+
+```bash
+# Upload a bank statement
+curl -X POST http://localhost:8000/upload \
+  -H "X-User-Id: alice" \
+  -F "file=@sample_data/bank_statement_q2_2026.csv"
+
+# Spending summary (all time)
+curl "http://localhost:8000/summary" -H "X-User-Id: alice"
+
+# Filter by month
+curl "http://localhost:8000/summary?month=2026-05" -H "X-User-Id: alice"
+
+# AI chat (requires AI_BACKEND=bedrock for real answers)
+curl -X POST http://localhost:8000/chat \
+  -H "X-User-Id: alice" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What did I spend the most on last month?"}'
+```
+
+Run automated tests:
+
 ```bash
 pytest -v
 ```
 
 ---
 
-## What's in the code
+## Code structure
 
 ```
 src/
-├── app.py               FastAPI app + routes. Runs on Lambda, ECS, EC2, App Runner.
-├── config.py            Env-driven settings.
-├── handlers.py          CSV parsing + categorization orchestration + aggregation.
-└── adapters/
-    ├── ai.py            BedrockAI (real InvokeModel Converse) | LocalAI (rule-based)
-    ├── storage.py       S3Storage | LocalStorage (filesystem)
-    ├── userstore.py     DynamoDBUserStore | PostgresUserStore | SQLiteUserStore
-    └── factory.py       Picks adapter based on env
+├── app.py                   FastAPI app + all routes (thin router layer)
+├── config.py                Env-driven settings
+├── adapters/
+│   ├── ai.py                BedrockAI (Converse API) | LocalAI (rule-based)
+│   ├── storage.py           S3Storage | LocalStorage (filesystem)
+│   ├── userstore.py         PostgresUserStore — all 5 tables
+│   └── factory.py           Picks adapter based on env vars
+├── handlers/
+│   ├── api_handler.py       Upload, summary, transactions, budget caps
+│   ├── chat_handler.py      AI chat + chat history
+│   ├── budget_handler.py    Budget cap checks + SNS alerts
+│   └── parser_handler.py    SQS event → CSV parse → DB write
+└── lambdas/
+    ├── lambda_api.py        Lambda 1 — API Gateway (Mangum wrapper)
+    ├── lambda_parser.py     Lambda 2 — SQS-triggered CSV parser
+    ├── lambda_chat.py       Lambda 3 — Chat routes (Mangum wrapper)
+    └── lambda_budget.py     Lambda 4 — Budget cap checker + SNS
+
+frontend/
+└── index.html               Single-page UI (served by FastAPI or CloudFront+S3)
+
+sql/
+└── init_db.sql              PostgreSQL schema (idempotent, safe to re-run)
+
+sample_data/
+├── bank_statement_q2_2026.csv   Full Q2 2026 sample (VND)
+├── smoke_test_5_rows.csv        Minimal 5-row test fixture
+└── postgres_test_statement.csv  Integration test fixture
 ```
 
-**No vector store** — BudgetBot uses direct InvokeModel for one-shot classification. This is a key architecture difference from StudyBot and DocHub (which use RAG).
+### Database schema (5 tables)
+
+
+| Table          | Purpose                                                                        |
+| -------------- | ------------------------------------------------------------------------------ |
+| `user`         | Account, password, budget total                                                |
+| `file`         | Uploaded statement files with `status` (`pending → processing → done / error`) |
+| `transaction`  | Parsed rows: date, description, amount, category, confidence, review_status    |
+| `chat_history` | Chat turns (input + output) per user                                           |
+| `budget_cap`   | Per-user, per-category spending caps                                           |
+
+
+### Transaction categories
+
+`Food` · `Transport` · `Shopping` · `Utilities` · `Entertainment` · `Health` · `Subscriptions` · `Bills` · `Income` · `Transfer` · `Other`
+
+Transactions with AI confidence below `REVIEW_THRESHOLD` (default `0.60`) are flagged as `review_status='review'` and surfaced via `GET /transactions/review`.
 
 ---
 
-## 9 deployment decisions still yours
+## API reference
 
-Same matrix as the other apps. Notable points for BudgetBot:
 
-- **DB choice trade-off:** Aggregations like `SELECT category, SUM(amount) FROM transactions WHERE user_id=? GROUP BY category` are natural fits for SQL (Postgres). DynamoDB requires a Scan or careful GSI design. Document this trade-off in your Evidence Pack.
-- **RDS Proxy:** With Lambda + Postgres, you'll want RDS Proxy to handle connection pooling. The code uses `psycopg2.connect()` — Lambda containers each open their own connection.
-- **Cost:** RDS db.t3.micro (~$1.25/48h in Singapore) is the biggest fixed cost. Single-AZ. Skip Multi-AZ for hackathon.
+| Method | Route                         | Description                                                  |
+| ------ | ----------------------------- | ------------------------------------------------------------ |
+| GET    | `/health`                     | Backend status + active adapters                             |
+| POST   | `/users`                      | Create user                                                  |
+| GET    | `/users/{id}`                 | Get user                                                     |
+| PUT    | `/users/{id}`                 | Update user                                                  |
+| DELETE | `/users/{id}`                 | Delete user                                                  |
+| POST   | `/upload`                     | Upload CSV bank statement                                    |
+| GET    | `/upload/{file_id}/status`    | Poll async processing status                                 |
+| GET    | `/files`                      | List uploaded files for user                                 |
+| GET    | `/summary`                    | Spending summary by category (optional `?month=YYYY-MM`)     |
+| GET    | `/transactions`               | List transactions (optional `?month=` and `?review_status=`) |
+| GET    | `/transactions/review`        | Low-confidence transactions needing human review             |
+| PATCH  | `/transactions/{id}/category` | Manually correct a category                                  |
+| GET    | `/budget-caps`                | Get all budget caps for user                                 |
+| PUT    | `/budget-caps/{category}`     | Set a budget cap                                             |
+| DELETE | `/budget-caps/{category}`     | Remove a budget cap                                          |
+| POST   | `/budget/check`               | Manually trigger budget cap check                            |
+| POST   | `/chat`                       | Send message to AI coach (optional `?month=` context)        |
+| GET    | `/chat/history`               | Get chat history                                             |
+
+
+All user-scoped routes accept `X-User-Id` header. Falls back to `DEFAULT_USER_ID` if omitted.
 
 ---
 
-## Deploy hints
+## Environment variables
 
-Env flip:
+```bash
+# AI backend
+AI_BACKEND=local                   # local | bedrock
+AI_MODEL_ID=anthropic.claude-3-5-haiku-20241022-v1:0
+AWS_REGION=ap-southeast-1
+
+# Storage backend
+STORAGE_BACKEND=local              # local | s3
+STORAGE_BUCKET=                    # required when STORAGE_BACKEND=s3
+STORAGE_LOCAL_DIR=./_data/uploads
+
+# Database
+USERSTORE_POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/budgetbot
+
+# Flow mode
+FLOW_MODE=local                    # local (sync) | aws (S3 + SQS async)
+SQS_QUEUE_URL=                     # required when FLOW_MODE=aws
+
+# Budget alerts
+SNS_TOPIC_ARN=                     # SNS topic for budget cap email alerts
+
+# Lambda names (aws flow)
+BUDGET_LAMBDA_NAME=budgetbot-budget-handler
+PARSER_LAMBDA_NAME=budgetbot-parser
+
+# Thresholds / misc
+REVIEW_THRESHOLD=0.60              # confidence below this → review queue
+DEFAULT_USER_ID=00000000-0000-0000-0000-000000000001
+LOG_LEVEL=INFO
+SERVE_FRONTEND=true                # false = deploy frontend separately
+CORS_ORIGINS=*
+```
+
+---
+
+## Deploy to AWS
+
+### Flip env vars
+
 ```diff
 - AI_BACKEND=local
 + AI_BACKEND=bedrock
@@ -74,36 +231,53 @@ Env flip:
 
 - STORAGE_BACKEND=local
 + STORAGE_BACKEND=s3
-+ STORAGE_BUCKET=budgetbot-statements-g<N>-<accountid>
++ STORAGE_BUCKET=budgetbot-statements-<account-id>
 
-- USERSTORE_BACKEND=sqlite
-+ USERSTORE_BACKEND=postgres          # OR dynamodb
-+ USERSTORE_POSTGRES_URL=postgresql://user:pw@your-rds-endpoint:5432/budgetbot
+- FLOW_MODE=local
++ FLOW_MODE=aws
++ SQS_QUEUE_URL=https://sqs.ap-southeast-1.amazonaws.com/<account-id>/budgetbot-parse-queue
+
++ USERSTORE_POSTGRES_URL=postgresql://user:pw@<rds-endpoint>:5432/budgetbot
++ SNS_TOPIC_ARN=arn:aws:sns:ap-southeast-1:<account-id>:budgetbot-alerts
 ```
 
-For DynamoDB, set `USERSTORE_TABLE=...` instead of the postgres URL.
+### Lambda handlers
 
-Lambda packaging: wrap `from src.app import app` with `Mangum` (`pip install mangum`).
 
----
+| Lambda            | Handler path                        | Trigger                                 |
+| ----------------- | ----------------------------------- | --------------------------------------- |
+| Lambda 1 — API    | `src/lambdas/lambda_api.handler`    | API Gateway (all routes except `/chat`) |
+| Lambda 2 — Parser | `src/lambdas/lambda_parser.handler` | SQS (`budgetbot-parse-queue`)           |
+| Lambda 3 — Chat   | `src/lambdas/lambda_chat.handler`   | API Gateway (`/chat/*`)                 |
+| Lambda 4 — Budget | `src/lambdas/lambda_budget.handler` | Async Lambda invoke from Parser         |
 
-## Customization ideas (Criterion I)
 
-- **Budget goals + alerts** — let users set "max $200/month on Food" with SNS notification when crossed
-- **Recurring transaction detection** — flag subscriptions automatically (Netflix, Spotify, etc.)
-- **Multi-currency** — detect VND vs USD, convert on the fly
-- **Forecasting** — given 2 months of data, predict next month per category
-- **Anomaly detection** — flag transactions >2σ from category mean (real-time use case for AWS Lookout for Metrics OR a simple Lambda)
-- **Receipt OCR** — accept PDF receipts, extract via Textract → categorize
+All Lambdas share the same `requirements.txt`. `mangum` is already included.
+
+### Cost notes (Singapore — ap-southeast-1)
+
+- **RDS PostgreSQL** db.t3.micro ≈ $1.25/48 h. Use Single-AZ for hackathon, skip Multi-AZ.
+- **RDS Proxy** — recommended with Lambda + Postgres to avoid connection exhaustion (each Lambda container opens its own `psycopg2` connection otherwise).
+- Bedrock Haiku is priced per token; low for single-transaction classification calls.
+
+### Frontend deployment options
+
+
+| Option            | Config                                                                                                                        |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Served by FastAPI | `SERVE_FRONTEND=true` (default). Backend serves `frontend/index.html` at `/`.                                                 |
+| CloudFront + S3   | Upload `frontend/index.html` to S3 + CloudFront. Set `SERVE_FRONTEND=false` and set `CORS_ORIGINS` to your CloudFront domain. |
+
 
 ---
 
 ## Sample CSV format
 
-```
+```csv
 date,description,amount
 2026-05-02,Highlands Coffee - Bui Vien,-65000
 2026-05-04,Salary deposit credit,18500000
+2026-05-07,Netflix monthly subscription,-180000
 ```
 
-Header row optional. Negative amounts = expenses; positive = income. Currency assumed VND in the local stub but Bedrock doesn't care — describe the transaction and the LLM figures it out.
+Header row is optional. **Negative amounts = expenses; positive = income.** Currency is assumed VND locally; the Bedrock model infers meaning from descriptions so currency does not need to be specified.
