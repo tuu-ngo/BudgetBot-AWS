@@ -1,0 +1,83 @@
+name: Deploy Backend Lambdas
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Verify Lambda functions exist
+        run: |
+          aws lambda get-function --function-name budgetbot-budget-handler
+          aws lambda get-function --function-name BudgetBot_Parser_Lambda
+          aws lambda get-function --function-name budgetbot_chat_lambda
+          aws lambda get-function --function-name budgetbot-api
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build Lambda package
+        run: |
+          rm -rf package lambda_package.zip
+          mkdir -p package
+
+          pip install -r requirements.txt -t package
+
+          cp -r src package/
+
+          cp src/lambdas/lambda_function.py package/lambda_function.py
+          cp src/lambdas/lambda_function_budget.py package/lambda_function_budget.py
+          cp src/lambdas/lambda_chat_function.py package/lambda_chat_function.py
+
+          cd package
+          zip -r ../lambda_package.zip .
+
+      - name: Deploy Budget Handler Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name budgetbot-budget-handler \
+            --zip-file fileb://lambda_package.zip
+
+      - name: Deploy Parser Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name BudgetBot_Parser_Lambda \
+            --zip-file fileb://lambda_package.zip
+
+      - name: Deploy Chat Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name budgetbot_chat_lambda \
+            --zip-file fileb://lambda_package.zip
+
+      - name: Deploy API Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name budgetbot-api \
+            --zip-file fileb://lambda_package.zip

@@ -1,0 +1,55 @@
+name: Deploy Demo Lambda
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - cicd-build-only
+    paths:
+      - "demo-lambda/**"
+      - ".github/workflows/deploy-demo-lambda.yml"
+
+jobs:
+  deploy-demo:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Verify demo Lambda exists
+        run: |
+          aws lambda get-function --function-name budgetbot-cicd-demo
+
+      - name: Build demo Lambda package
+        run: |
+          cd demo-lambda
+          zip -r ../demo_lambda_package.zip lambda_function.py
+
+      - name: Verify package content
+        run: |
+          unzip -l demo_lambda_package.zip
+
+      - name: Deploy to demo Lambda only
+        run: |
+          aws lambda update-function-code \
+            --function-name budgetbot-cicd-demo \
+            --zip-file fileb://demo_lambda_package.zip
