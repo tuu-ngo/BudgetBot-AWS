@@ -1,8 +1,8 @@
 const DEFAULT_USER_ID = '00000000-0000-0000-0000-000000000001'
 
 const getApiBaseUrl = () => {
-  const fromEnv = import.meta.env.VITE_API_BASE_URL
-  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  const API_BASE = import.meta.env.VITE_API_BASE
+  if (API_BASE) return API_BASE.replace(/\/$/, '')
   return window.location.port === '5173' ? 'http://localhost:8000' : ''
 }
 
