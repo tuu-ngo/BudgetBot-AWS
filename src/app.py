@@ -8,8 +8,9 @@ This file is a thin router. All business logic lives in src/handlers/.
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -20,8 +21,9 @@ from src.handlers import api_handler, chat_handler, budget_handler
 app = FastAPI(title="BudgetBot — AI Money Coach")
 
 _origins = (
-    ["*"] if config.cors_origins == "*"
-    else [o.strip() for o in config.cors_origins.split(",") if o.strip()]
+    [o.strip() for o in config.cors_origins.split(",") if o.strip()]
+    if config.cors_origins != "*"
+    else ["http://localhost:5173", "http://127.0.0.1:5173"]
 )
 app.add_middleware(
     CORSMiddleware,
@@ -36,9 +38,12 @@ ai_client = factory.make_ai()
 storage    = factory.make_storage()
 userstore  = factory.make_userstore()
 
+DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
 
-def _uid(x_user_id: Optional[str]) -> str:
-    return x_user_id or config.default_user_id
+
+def _uid(x_user_id: str = Header(default=DEFAULT_USER_ID)) -> str:
+    """Resolve user from X-User-Id header; falls back to the default test user."""
+    return x_user_id or DEFAULT_USER_ID
 
 
 # =============================================================================
@@ -94,12 +99,14 @@ def health() -> dict:
 @app.post("/users", status_code=201)
 def create_user(body: UserCreate) -> dict:
     try:
-        user = userstore.create_user(account=body.account, password=body.password, budget=body.budget)
-        return {"status": "created", "user": user}
+        user = userstore.create_user(
+            account=body.account,
+            password=body.password,
+            budget=body.budget,
+        )
     except Exception as e:
-        if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
-            raise HTTPException(status_code=409, detail="Account already exists")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"user": user}
 
 
 @app.get("/users/{user_id}")
@@ -137,13 +144,12 @@ def delete_user(user_id: str) -> dict:
 @app.post("/upload")
 async def upload(
     file: UploadFile = File(...),
-    x_user_id: Optional[str] = Header(default=None),
+    user_id: str = Depends(_uid),
 ) -> dict:
     """
     FLOW_MODE=local  → processes inline, returns categorized results immediately.
     FLOW_MODE=aws    → returns {presigned_url, file_id}; parsing happens async via SQS.
     """
-    user_id = _uid(x_user_id)
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -176,36 +182,37 @@ def file_status(file_id: str) -> dict:
 @app.get("/summary")
 def summary(
     month: Optional[str] = None,
-    x_user_id: Optional[str] = Header(default=None),
+    user_id: str = Depends(_uid),
 ) -> dict:
-    return api_handler.handle_summary(_uid(x_user_id), month, userstore)
+    return api_handler.handle_summary(user_id, month, userstore)
 
 
 @app.get("/transactions")
 def transactions(
     month:         Optional[str] = None,
     review_status: Optional[str] = None,
-    x_user_id:     Optional[str] = Header(default=None),
+    user_id: str = Depends(_uid),
 ) -> dict:
     return api_handler.handle_list_transactions(
-        _uid(x_user_id), month, userstore, review_status=review_status
+        user_id, month, userstore, review_status=review_status
     )
 
 
 @app.get("/transactions/review")
-def review_queue(x_user_id: Optional[str] = Header(default=None)) -> dict:
+def review_queue(user_id: str = Depends(_uid)) -> dict:
     """Transactions with low AI confidence that need human review."""
-    return api_handler.handle_review_queue(_uid(x_user_id), userstore)
+    return api_handler.handle_review_queue(user_id, userstore)
 
 
 @app.patch("/transactions/{transaction_id}/category")
 def update_category(
     transaction_id: str,
     body: CategoryUpdate,
-    x_user_id: Optional[str] = Header(default=None),
 ) -> dict:
     """User manually corrects a transaction category."""
-    result = api_handler.handle_update_category(transaction_id, body.category, userstore)
+    result = api_handler.handle_update_category(
+        transaction_id, body.category, userstore
+    )
     if not result:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return result
@@ -216,9 +223,8 @@ def update_category(
 # =============================================================================
 
 @app.get("/files")
-def list_files(x_user_id: Optional[str] = Header(default=None)) -> dict:
-    uid = _uid(x_user_id)
-    return {"user_id": uid, "files": userstore.list_files(uid)}
+def list_files(user_id: str = Depends(_uid)) -> dict:
+    return {"user_id": user_id, "files": userstore.list_files(user_id)}
 
 
 # =============================================================================
@@ -226,18 +232,18 @@ def list_files(x_user_id: Optional[str] = Header(default=None)) -> dict:
 # =============================================================================
 
 @app.get("/budget-caps")
-def get_caps(x_user_id: Optional[str] = Header(default=None)) -> dict:
-    return api_handler.handle_get_caps(_uid(x_user_id), userstore)
+def get_caps(user_id: str = Depends(_uid)) -> dict:
+    return api_handler.handle_get_caps(user_id, userstore)
 
 
 @app.put("/budget-caps/{category}")
 def set_cap(
     category: str,
     body: BudgetCapBody,
-    x_user_id: Optional[str] = Header(default=None),
+    user_id: str = Depends(_uid),
 ) -> dict:
     try:
-        return api_handler.handle_set_cap(_uid(x_user_id), category, body.cap_amount, userstore)
+        return api_handler.handle_set_cap(user_id, category, body.cap_amount, userstore)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -245,9 +251,9 @@ def set_cap(
 @app.delete("/budget-caps/{category}")
 def delete_cap(
     category: str,
-    x_user_id: Optional[str] = Header(default=None),
+    user_id: str = Depends(_uid),
 ) -> dict:
-    return api_handler.handle_delete_cap(_uid(x_user_id), category, userstore)
+    return api_handler.handle_delete_cap(user_id, category, userstore)
 
 
 # =============================================================================
@@ -257,9 +263,8 @@ def delete_cap(
 @app.post("/chat")
 def chat(
     body: ChatRequest,
-    x_user_id: Optional[str] = Header(default=None),
+    user_id: str = Depends(_uid),
 ) -> dict:
-    user_id = _uid(x_user_id)
     if not body.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
     return chat_handler.handle_chat(
@@ -273,29 +278,42 @@ def chat(
 
 @app.get("/chat/history")
 def chat_history(
-    limit:     int = 50,
-    x_user_id: Optional[str] = Header(default=None),
+    limit:   int = 50,
+    user_id: str = Depends(_uid),
 ) -> dict:
-    return chat_handler.handle_get_chat_history(_uid(x_user_id), limit, userstore)
+    return chat_handler.handle_get_chat_history(user_id, limit, userstore)
 
 
 # =============================================================================
-# Budget check endpoint (for manual trigger / testing)
+# Budget check endpoint (frontend warning display)
 # =============================================================================
 
 @app.post("/budget/check")
-def budget_check(x_user_id: Optional[str] = Header(default=None)) -> dict:
-    """Manually trigger a budget cap check (useful for local testing)."""
-    return budget_handler.check_and_alert(_uid(x_user_id), userstore)
+def budget_check(user_id: str = Depends(_uid)) -> dict:
+    """Return budget cap warnings for the current user."""
+    return budget_handler.check_budget_caps(user_id, userstore)
 
 
 # =============================================================================
 # Static frontend (disabled when deploying frontend separately)
 # =============================================================================
+# Frontend is a Vite/React SPA. Build it first:
+#   cd frontend && npm install && npm run build
+# This creates frontend/dist/ which FastAPI serves below.
+# =============================================================================
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
 
-if config.serve_frontend:
+if config.serve_frontend and FRONTEND_DIST_DIR.exists():
+    # Serve the built JS/CSS/assets bundle
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="assets")
+
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(FRONTEND_DIR / "index.html")
+        return FileResponse(FRONTEND_DIST_DIR / "index.html")
+
+    # SPA fallback: any unknown path returns index.html so React Router can handle it
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str) -> FileResponse:
+        return FileResponse(FRONTEND_DIST_DIR / "index.html")

@@ -8,11 +8,9 @@ const getApiBaseUrl = () => {
 
 const API_BASE_URL = getApiBaseUrl()
 
-const getUserId = () => localStorage.getItem('budgetbot_user_id') || DEFAULT_USER_ID
-
 async function request(path, options = {}) {
   const headers = {
-    'X-User-Id': getUserId(),
+    'X-User-Id': DEFAULT_USER_ID,
     ...(options.headers || {}),
   }
 
@@ -69,6 +67,7 @@ export const api = {
       body: { category },
     }),
   getBudgetCaps: () => request('/budget-caps'),
+  checkBudget: () => request('/budget/check', { method: 'POST' }),
   setBudgetCap: (category, capAmount) =>
     request(`/budget-caps/${encodeURIComponent(category)}`, {
       method: 'PUT',
@@ -106,5 +105,4 @@ export const normalizeTransaction = (txn) => ({
 
 export const getApiConfig = () => ({
   baseUrl: API_BASE_URL || window.location.origin,
-  userId: getUserId(),
 })

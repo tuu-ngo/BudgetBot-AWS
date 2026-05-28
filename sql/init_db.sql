@@ -30,10 +30,10 @@ $$;
 -- Table 1: user
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS "user" (
-    user_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account     VARCHAR(255) NOT NULL UNIQUE,
-    password    VARCHAR(255) NOT NULL,
-    budget      INTEGER DEFAULT 0
+    user_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account  VARCHAR(255) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    budget   INTEGER DEFAULT 0
 );
 
 -- Seed default test user

@@ -46,7 +46,6 @@ export function AppShell({ title, subtitle, children }) {
               )
             })}
           </nav>
-
         </div>
       </div>
 

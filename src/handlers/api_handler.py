@@ -116,6 +116,7 @@ def handle_upload(
 
 def _upload_local(user_id, filename, data, storage, userstore, ai_client):
     """Synchronous inline processing — local dev."""
+    from src.handlers.budget_handler import check_budget_caps
     from src.handlers.parser_handler import process_rows
 
     s3_key = f"{user_id}/{filename}"
@@ -132,6 +133,7 @@ def _upload_local(user_id, filename, data, storage, userstore, ai_client):
         ai_client=ai_client,
         userstore=userstore,
     )
+    budget_check = check_budget_caps(user_id, userstore)
 
     return {
         "flow_mode":         "local",
@@ -142,6 +144,7 @@ def _upload_local(user_id, filename, data, storage, userstore, ai_client):
         "rows_inserted":     results["inserted"],
         "rows_review":       results["review_count"],
         "sample_categorized": results["samples"],
+        "budget_check":      budget_check,
     }
 
 
@@ -203,10 +206,7 @@ def _upload_aws(user_id, filename, data, storage, userstore):
 # =============================================================================
 
 def handle_file_status(file_id: str, userstore) -> dict:
-    file_rec = userstore.get_file(file_id)
-    if not file_rec:
-        return None
-    return file_rec
+    return userstore.get_file(file_id)
 
 
 # =============================================================================

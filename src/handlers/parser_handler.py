@@ -12,7 +12,7 @@ Flow per SQS message:
        - confidence >= threshold  → review_status='ok'
        - confidence <  threshold  → review_status='review'
     5. Update file status → 'done'
-    6. Async invoke Budget Lambda (fire-and-forget)
+    6. Frontend polls status, then calls /budget/check for direct warning display
 """
 import json
 import logging
@@ -111,9 +111,6 @@ def process_sqs_event(event: dict, context, storage, ai_client, userstore) -> di
                 file_id, result["inserted"], result["review_count"],
             )
 
-            # Async invoke Budget Lambda (fire-and-forget, non-blocking)
-            _invoke_budget_lambda(user_id=user_id, file_id=file_id)
-
             results.append({"file_id": file_id, "status": "done", **result})
 
         except Exception as exc:
@@ -123,20 +120,3 @@ def process_sqs_event(event: dict, context, storage, ai_client, userstore) -> di
 
     return {"processed": len(results), "results": results}
 
-
-def _invoke_budget_lambda(user_id: str, file_id: str) -> None:
-    """Async invoke Budget Handler Lambda. Non-blocking — errors are logged, not raised."""
-    if not config.budget_lambda_name:
-        logger.debug("BUDGET_LAMBDA_NAME not set — skipping budget check")
-        return
-    try:
-        import boto3
-        lambda_client = boto3.client("lambda", region_name=config.aws_region)
-        lambda_client.invoke(
-            FunctionName=config.budget_lambda_name,
-            InvocationType="Event",  # async, fire-and-forget
-            Payload=json.dumps({"user_id": user_id, "file_id": file_id}),
-        )
-        logger.info("Budget Lambda invoked async for user_id=%s", user_id)
-    except Exception as exc:
-        logger.warning("Could not invoke Budget Lambda: %s", exc)

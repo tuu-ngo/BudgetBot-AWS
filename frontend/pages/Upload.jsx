@@ -6,6 +6,7 @@ import {
   Check,
   Loader2,
   AlertCircle,
+  AlertTriangle,
   X,
   ArrowRight,
   Info,
@@ -19,6 +20,7 @@ export function Upload() {
   const [file, setFile] = useState(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [uploadResult, setUploadResult] = useState(null)
+  const [budgetCheck, setBudgetCheck] = useState(null)
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef(null)
   const navigate = useNavigate()
@@ -54,10 +56,12 @@ export function Upload() {
     if (!file) return
     setErrorMsg('')
     setUploadResult(null)
+    setBudgetCheck(null)
     try {
       setStatus('uploading')
       const result = await api.uploadStatement(file)
       setUploadResult(result)
+      let latestBudgetCheck = result.budget_check || null
 
       if (result.flow_mode === 'aws' && result.file_id) {
         setStatus('processing')
@@ -70,10 +74,14 @@ export function Upload() {
         if (latestStatus === 'error') {
           throw new Error('File processing failed. Please try another CSV.')
         }
+        latestBudgetCheck = await api.checkBudget()
       }
 
+      setBudgetCheck(latestBudgetCheck)
       setStatus('success')
-      setTimeout(() => navigate('/dashboard'), 1500)
+      if (!latestBudgetCheck?.warnings_count) {
+        setTimeout(() => navigate('/dashboard'), 1500)
+      }
     } catch (err) {
       setErrorMsg(err.message || 'Upload failed. Please try again.')
       setStatus('error')
@@ -84,8 +92,10 @@ export function Upload() {
     setStatus('idle')
     setErrorMsg('')
     setUploadResult(null)
+    setBudgetCheck(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
+  const budgetWarnings = budgetCheck?.warnings || []
   return (
     <AppShell
       title="Upload Statement"
@@ -307,12 +317,54 @@ export function Upload() {
                             {uploadResult?.rows_review
                               ? ` · ${uploadResult.rows_review} need review`
                               : ''}{' '}
-                            · Redirecting to dashboard...
+                            {budgetWarnings.length
+                              ? '· Budget warning detected'
+                              : '· Redirecting to dashboard...'}
                           </p>
                         </div>
                       </motion.div>
                     )}
                   </AnimatePresence>
+
+                  {status === 'success' && budgetWarnings.length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-red-50 border border-red-100 rounded-xl p-4 mb-6"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-full bg-red-500 text-white flex items-center justify-center flex-shrink-0">
+                          <AlertTriangle size={16} />
+                        </div>
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-red-900">
+                            Budget cap exceeded
+                          </p>
+                          <p className="text-xs text-red-700 mt-0.5">
+                            Your latest upload pushed one or more categories over budget.
+                          </p>
+                          <div className="mt-3 space-y-2">
+                            {budgetWarnings.map((warning) => (
+                              <div
+                                key={warning.category}
+                                className="bg-white/70 border border-red-100 rounded-lg p-3 text-xs text-red-900"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="font-semibold">{warning.category}</span>
+                                  <span>{warning.percent}% used</span>
+                                </div>
+                                <p className="mt-1 text-red-700">
+                                  Spent {Number(warning.spent).toLocaleString()} / cap{' '}
+                                  {Number(warning.cap_amount).toLocaleString()} · over by{' '}
+                                  {Number(warning.over_by).toLocaleString()}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
 
                   {/* Actions */}
                   {status === 'selected' && (

@@ -73,24 +73,8 @@ start http://localhost:8000       # Windows
 
 ### 4. End-to-end smoke test
 
-```bash
-# Upload a bank statement
-curl -X POST http://localhost:8000/upload \
-  -H "X-User-Id: alice" \
-  -F "file=@sample_data/bank_statement_q2_2026.csv"
-
-# Spending summary (all time)
-curl "http://localhost:8000/summary" -H "X-User-Id: alice"
-
-# Filter by month
-curl "http://localhost:8000/summary?month=2026-05" -H "X-User-Id: alice"
-
-# AI chat (requires AI_BACKEND=bedrock for real answers)
-curl -X POST http://localhost:8000/chat \
-  -H "X-User-Id: alice" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What did I spend the most on last month?"}'
-```
+Open the web UI, sign up or log in through Cognito, then upload a CSV.
+User-scoped APIs require the Cognito session cookie set by `/auth/callback`.
 
 Run automated tests:
 
@@ -105,6 +89,7 @@ pytest -v
 ```
 src/
 ├── app.py                   FastAPI app + all routes (thin router layer)
+├── auth.py                  Cognito Hosted UI + JWT cookie verification
 ├── config.py                Env-driven settings
 ├── adapters/
 │   ├── ai.py                BedrockAI (Converse API) | LocalAI (rule-based)
@@ -114,13 +99,13 @@ src/
 ├── handlers/
 │   ├── api_handler.py       Upload, summary, transactions, budget caps
 │   ├── chat_handler.py      AI chat + chat history
-│   ├── budget_handler.py    Budget cap checks + SNS alerts
+│   ├── budget_handler.py    Budget cap checks for frontend warnings
 │   └── parser_handler.py    SQS event → CSV parse → DB write
 └── lambdas/
     ├── lambda_api.py        Lambda 1 — API Gateway (Mangum wrapper)
     ├── lambda_parser.py     Lambda 2 — SQS-triggered CSV parser
     ├── lambda_chat.py       Lambda 3 — Chat routes (Mangum wrapper)
-    └── lambda_budget.py     Lambda 4 — Budget cap checker + SNS
+    └── lambda_budget.py     Lambda 4 — Budget cap checker
 
 frontend/
 └── index.html               Single-page UI (served by FastAPI or CloudFront+S3)
@@ -160,10 +145,12 @@ Transactions with AI confidence below `REVIEW_THRESHOLD` (default `0.60`) are fl
 | Method | Route                         | Description                                                  |
 | ------ | ----------------------------- | ------------------------------------------------------------ |
 | GET    | `/health`                     | Backend status + active adapters                             |
-| POST   | `/users`                      | Create user                                                  |
-| GET    | `/users/{id}`                 | Get user                                                     |
-| PUT    | `/users/{id}`                 | Update user                                                  |
-| DELETE | `/users/{id}`                 | Delete user                                                  |
+| GET    | `/auth/login`                 | Redirect to Cognito Hosted UI login                          |
+| GET    | `/auth/signup`                | Redirect to Cognito Hosted UI signup                         |
+| GET    | `/auth/callback`              | Exchange Cognito code and set HttpOnly session cookie        |
+| GET    | `/auth/me`                    | Current authenticated user                                   |
+| GET    | `/auth/logout`                | Clear session and redirect through Cognito logout            |
+| GET    | `/users/me`                   | Current local user mapped from Cognito                       |
 | POST   | `/upload`                     | Upload CSV bank statement                                    |
 | GET    | `/upload/{file_id}/status`    | Poll async processing status                                 |
 | GET    | `/files`                      | List uploaded files for user                                 |
@@ -174,12 +161,14 @@ Transactions with AI confidence below `REVIEW_THRESHOLD` (default `0.60`) are fl
 | GET    | `/budget-caps`                | Get all budget caps for user                                 |
 | PUT    | `/budget-caps/{category}`     | Set a budget cap                                             |
 | DELETE | `/budget-caps/{category}`     | Remove a budget cap                                          |
-| POST   | `/budget/check`               | Manually trigger budget cap check                            |
+| POST   | `/budget/check`               | Return budget cap warnings for frontend display              |
 | POST   | `/chat`                       | Send message to AI coach (optional `?month=` context)        |
 | GET    | `/chat/history`               | Get chat history                                             |
 
 
-All user-scoped routes accept `X-User-Id` header. Falls back to `DEFAULT_USER_ID` if omitted.
+All user-scoped routes require the Cognito session cookie. The backend resolves
+`user_id` from verified Cognito JWT claims; the frontend does not send
+`X-User-Id` and does not store tokens in localStorage.
 
 ---
 
@@ -203,19 +192,50 @@ USERSTORE_POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/budgetbot
 FLOW_MODE=local                    # local (sync) | aws (S3 + SQS async)
 SQS_QUEUE_URL=                     # required when FLOW_MODE=aws
 
-# Budget alerts
-SNS_TOPIC_ARN=                     # SNS topic for budget cap email alerts
+# Cognito Hosted UI auth
+COGNITO_REGION=ap-southeast-1
+COGNITO_USER_POOL_ID=
+COGNITO_CLIENT_ID=
+COGNITO_CLIENT_SECRET=
+COGNITO_DOMAIN=
+COGNITO_REDIRECT_URI=http://localhost:8000/auth/callback
+COGNITO_LOGOUT_URI=http://localhost:5173/login
+AUTH_SUCCESS_REDIRECT_URI=http://localhost:5173/upload
+AUTH_COOKIE_NAME=budgetbot_session
+AUTH_COOKIE_SECURE=false
+AUTH_COOKIE_SAMESITE=lax
 
-# Lambda names (aws flow)
-BUDGET_LAMBDA_NAME=budgetbot-budget-handler
+# Lambda names
 PARSER_LAMBDA_NAME=budgetbot-parser
 
 # Thresholds / misc
 REVIEW_THRESHOLD=0.60              # confidence below this → review queue
-DEFAULT_USER_ID=00000000-0000-0000-0000-000000000001
 LOG_LEVEL=INFO
 SERVE_FRONTEND=true                # false = deploy frontend separately
-CORS_ORIGINS=*
+CORS_ORIGINS=http://localhost:5173
+```
+
+### Cognito setup
+
+Create a Cognito User Pool manually in AWS:
+
+1. Create a User Pool with email sign-up/sign-in.
+2. Create an App Client for Hosted UI with Authorization Code grant enabled.
+3. Add scopes: `openid`, `email`, `profile`.
+4. Configure callback URLs:
+   - Local: `http://localhost:8000/auth/callback`
+   - AWS: your deployed backend callback URL.
+5. Configure sign-out URLs:
+   - Local: `http://localhost:5173/login`
+   - AWS: your deployed frontend login URL.
+6. Create a Hosted UI domain and set `COGNITO_DOMAIN` to the full `https://...amazoncognito.com` URL.
+
+For AWS HTTPS deployments set:
+
+```bash
+AUTH_COOKIE_SECURE=true
+AUTH_COOKIE_SAMESITE=none
+CORS_ORIGINS=https://your-frontend-domain.example
 ```
 
 ---
@@ -238,7 +258,6 @@ CORS_ORIGINS=*
 + SQS_QUEUE_URL=https://sqs.ap-southeast-1.amazonaws.com/<account-id>/budgetbot-parse-queue
 
 + USERSTORE_POSTGRES_URL=postgresql://user:pw@<rds-endpoint>:5432/budgetbot
-+ SNS_TOPIC_ARN=arn:aws:sns:ap-southeast-1:<account-id>:budgetbot-alerts
 ```
 
 ### Lambda handlers
@@ -249,7 +268,7 @@ CORS_ORIGINS=*
 | Lambda 1 — API    | `src/lambdas/lambda_api.handler`    | API Gateway (all routes except `/chat`) |
 | Lambda 2 — Parser | `src/lambdas/lambda_parser.handler` | SQS (`budgetbot-parse-queue`)           |
 | Lambda 3 — Chat   | `src/lambdas/lambda_chat.handler`   | API Gateway (`/chat/*`)                 |
-| Lambda 4 — Budget | `src/lambdas/lambda_budget.handler` | Async Lambda invoke from Parser         |
+| Lambda 4 — Budget | `src/lambdas/lambda_budget.handler` | Optional direct budget-check invocation |
 
 
 All Lambdas share the same `requirements.txt`. `mangum` is already included.
