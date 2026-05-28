@@ -8,3 +8,6 @@ _data/
 *.pem
 *.key
 node_modules/
+package/
+lambda_package.zip
+aws-lambda-backup/
