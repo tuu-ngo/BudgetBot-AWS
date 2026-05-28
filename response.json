@@ -1,0 +1,1 @@
+{"statusCode": 200, "body": "{\"status\":\"ok\",\"flow_mode\":\"local\",\"backends\":{\"ai\":\"local\",\"storage\":\"s3\",\"db\":\"postgres\"}}", "headers": {"content-length": "92", "content-type": "application/json"}, "isBase64Encoded": false}

@@ -9,6 +9,7 @@ import csv
 import io
 import json
 import logging
+import boto3
 from typing import Optional
 
 from src.config import config
@@ -104,8 +105,8 @@ def handle_upload(
         Store file → create file record → parse CSV → categorize inline → insert txns → return result.
 
     FLOW_MODE=aws:
-        Create file record (status='pending') → generate presigned S3 PUT URL →
-        send SQS message → return {presigned_url, file_id, s3_key}.
+        Upload file to S3 → create file record (status='pending') →
+        send SQS message → return {file_id, s3_key}.
         Parsing happens in Lambda Parser triggered by SQS.
     """
     if config.flow_mode == "aws":
@@ -148,41 +149,55 @@ def _upload_local(user_id, filename, data, storage, userstore, ai_client):
 
 
 def _upload_aws(user_id, filename, data, storage, userstore):
-    """AWS flow — returns presigned URL for direct S3 PUT."""
-    import boto3
+    """
+    AWS async upload flow:
+    1. API Lambda receives the uploaded file from frontend
+    2. Uploads the file to S3
+    3. Creates a file record with status=pending
+    4. Sends a custom SQS message for Parser Lambda
+    5. Returns file_id so frontend can poll status
+    """
+    from src.config import config
 
+    if not config.sqs_queue_url:
+        raise RuntimeError("SQS_QUEUE_URL must be set when FLOW_MODE=aws")
+
+    if not config.storage_bucket:
+        raise RuntimeError("STORAGE_BUCKET must be set when FLOW_MODE=aws")
+
+    # Parser Lambda expects this to be the S3 key.
     s3_key = f"uploads/{user_id}/{filename}"
-    file_record = userstore.create_file(user_id=user_id, file_name=filename, status="pending")
-    file_id = file_record["file_id"]
 
-    # Generate presigned PUT URL (client uploads directly to S3)
-    s3_client = boto3.client("s3", region_name=config.aws_region)
-    presigned_url = s3_client.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": config.storage_bucket, "Key": s3_key},
-        ExpiresIn=300,
+    # Upload file to S3 using existing storage adapter.
+    stored_at = storage.put(s3_key, data)
+
+    # Create file record in RDS as pending.
+    file_record = userstore.create_file(
+        user_id=user_id,
+        file_name=s3_key,
+        status="pending",
     )
 
-    # Send SQS message so Parser Lambda can process after S3 upload
+    file_id = file_record["file_id"]
+
+    # Send custom message format that BudgetBot_Parser_Lambda expects.
     sqs = boto3.client("sqs", region_name=config.aws_region)
     sqs.send_message(
         QueueUrl=config.sqs_queue_url,
         MessageBody=json.dumps({
-            "user_id":  user_id,
-            "file_id":  file_id,
-            "s3_key":   s3_key,
-            "filename": filename,
+            "file_id": file_id,
+            "file_name": s3_key,
+            "bucket_name": config.storage_bucket,
         }),
     )
 
-    logger.info("Upload queued: file_id=%s s3_key=%s", file_id, s3_key)
     return {
-        "flow_mode":    "aws",
-        "file_id":      file_id,
-        "s3_key":       s3_key,
-        "presigned_url": presigned_url,
-        "status":       "pending",
-        "message":      "PUT the file to presigned_url, then poll /upload/{file_id}/status",
+        "flow_mode": "aws",
+        "file_id": file_id,
+        "s3_key": s3_key,
+        "stored_at": stored_at,
+        "status": "pending",
+        "message": "File uploaded to S3 and parser job queued. Poll /upload/{file_id}/status.",
     }
 
 

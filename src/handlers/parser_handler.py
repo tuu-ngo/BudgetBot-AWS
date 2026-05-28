@@ -76,10 +76,17 @@ def process_sqs_event(event: dict, context, storage, ai_client, userstore) -> di
     results = []
     for record in event.get("Records", []):
         body = json.loads(record["body"])
-        user_id  = body["user_id"]
-        file_id  = body["file_id"]
-        s3_key   = body["s3_key"]
+        file_id = body["file_id"]
+        s3_key = body.get("s3_key") or body.get("file_name")
+        if not s3_key:
+            raise ValueError("Missing s3_key/file_name in SQS message")
         filename = body.get("filename", s3_key.split("/")[-1])
+        user_id = body.get("user_id")
+        if not user_id:
+            file_rec = userstore.get_file(file_id)
+            if not file_rec:
+                raise ValueError("Missing user_id and file record not found")
+            user_id = file_rec["user_id"]
 
         logger.info("Processing SQS record: file_id=%s s3_key=%s", file_id, s3_key)
 

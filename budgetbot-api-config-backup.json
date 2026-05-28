@@ -1,0 +1,64 @@
+{
+    "FunctionName": "budgetbot-api",
+    "FunctionArn": "arn:aws:lambda:ap-southeast-1:459983119471:function:budgetbot-api",
+    "Runtime": "python3.12",
+    "Role": "arn:aws:iam::459983119471:role/BudgetBotApiLambdaRole",
+    "Handler": "src.lambdas.lambda_api.handler",
+    "CodeSize": 9271417,
+    "Description": "",
+    "Timeout": 60,
+    "MemorySize": 512,
+    "LastModified": "2026-05-28T04:47:17.000+0000",
+    "CodeSha256": "HZUCj/Cb7EI7SpK7mFKs8rcN94M0UELf8xC04oAuoAg=",
+    "Version": "$LATEST",
+    "VpcConfig": {
+        "SubnetIds": [
+            "subnet-0e94d4dc2c8bbf654",
+            "subnet-0cc2d116025232e8c"
+        ],
+        "SecurityGroupIds": [
+            "sg-0a5f42e9397fd92c3"
+        ],
+        "VpcId": "vpc-076ba58c1977e9b23",
+        "Ipv6AllowedForDualStack": false
+    },
+    "Environment": {
+        "Variables": {
+            "AI_MODEL_ID": "apac.amazon.nova-micro-v1:0",
+            "FLOW_MODE": "local",
+            "REVIEW_THRESHOLD": "0.60",
+            "SERVE_FRONTEND": "false",
+            "STORAGE_BUCKET": "budgetbot-statements-459983119471",
+            "DEFAULT_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "USERSTORE_POSTGRES_URL": "postgresql://postgres:Group2%212499@budgetbot-db.c146eysoi4kw.ap-southeast-1.rds.amazonaws.com:5432/postgres",
+            "STORAGE_BACKEND": "s3",
+            "CORS_ORIGINS": "*",
+            "LOG_LEVEL": "INFO",
+            "AI_BACKEND": "bedrock"
+        }
+    },
+    "TracingConfig": {
+        "Mode": "PassThrough"
+    },
+    "RevisionId": "e3537cf6-856a-469c-8c10-7b863aa30367",
+    "State": "Active",
+    "LastUpdateStatus": "Successful",
+    "PackageType": "Zip",
+    "Architectures": [
+        "x86_64"
+    ],
+    "EphemeralStorage": {
+        "Size": 512
+    },
+    "SnapStart": {
+        "ApplyOn": "None",
+        "OptimizationStatus": "Off"
+    },
+    "RuntimeVersionConfig": {
+        "RuntimeVersionArn": "arn:aws:lambda:ap-southeast-1::runtime:e4ab553846c4e081013ff7d1d608a5358d5b956bb5b81c83c66d2a31da8f6244"
+    },
+    "LoggingConfig": {
+        "LogFormat": "Text",
+        "LogGroup": "/aws/lambda/budgetbot-api"
+    }
+}

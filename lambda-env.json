@@ -1,0 +1,20 @@
+{
+  "Variables": {
+    "AI_BACKEND": "bedrock",
+    "AI_MODEL_ID": "apac.amazon.nova-micro-v1:0",
+
+    "FLOW_MODE": "aws",
+    "SQS_QUEUE_URL": "https://sqs.ap-southeast-1.amazonaws.com/459983119471/budgetbot-file-queue",
+
+    "STORAGE_BACKEND": "s3",
+    "STORAGE_BUCKET": "budgetbot-statements-459983119471",
+
+    "USERSTORE_POSTGRES_URL": "postgresql://postgres:Group2%212499@budgetbot-db.c146eysoi4kw.ap-southeast-1.rds.amazonaws.com:5432/postgres",
+
+    "DEFAULT_USER_ID": "00000000-0000-0000-0000-000000000001",
+    "REVIEW_THRESHOLD": "0.60",
+    "SERVE_FRONTEND": "false",
+    "CORS_ORIGINS": "*",
+    "LOG_LEVEL": "INFO"
+  }
+}
