@@ -7,3 +7,4 @@ _data/
 *.egg-info/
 *.pem
 *.key
+node_modules/

@@ -1,6 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
+  AlertTriangle,
+  Bell,
+  CheckCircle2,
   TrendingUp,
   TrendingDown,
   Wallet,
@@ -22,14 +25,26 @@ import { AppShell } from '../components/app/AppShell'
 import {
   formatVND,
   categoryColors,
+  categoryOptions,
   confidencePill,
 } from '../lib/mockData'
 import { api, normalizeTransaction } from '../lib/api'
 import { PillButton } from '../components/landing/PillButton'
+
+const alarmCategoryOptions = categoryOptions.filter(
+  (cat) => !['Groceries', 'Income', 'Transfer'].includes(cat),
+)
+
 export function Dashboard() {
   const [transactions, setTransactions] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [alarmCategory, setAlarmCategory] = useState('Food')
+  const [alarmAmount, setAlarmAmount] = useState('')
+  const [alarmSaving, setAlarmSaving] = useState(false)
+  const [alarmError, setAlarmError] = useState('')
+  const [budgetCheck, setBudgetCheck] = useState(null)
+  const [alarmSaved, setAlarmSaved] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -77,6 +92,44 @@ export function Dashboard() {
       color: categoryColors[name] || '#71717A',
     }))
   const topCategory = pieData[0]
+  const budgetWarnings = budgetCheck?.warnings || []
+  const selectedCategoryWarning = budgetWarnings.find(
+    (warning) => warning.category === alarmCategory,
+  )
+  const selectedCategoryDetail = budgetCheck?.details?.find(
+    (detail) => detail.category === alarmCategory,
+  )
+  const selectedCategorySpend = selectedCategoryDetail?.spent ?? 0
+
+  const handleSetBudgetAlarm = async (event) => {
+    event.preventDefault()
+    const capAmount = Number(alarmAmount)
+    setAlarmError('')
+    setAlarmSaved(false)
+    setBudgetCheck(null)
+
+    if (!alarmCategory) {
+      setAlarmError('Please choose a category.')
+      return
+    }
+    if (!Number.isFinite(capAmount) || capAmount <= 0) {
+      setAlarmError('Please enter a positive budget amount.')
+      return
+    }
+
+    setAlarmSaving(true)
+    try {
+      await api.setBudgetCap(alarmCategory, capAmount)
+      const check = await api.checkBudget()
+      setBudgetCheck(check)
+      setAlarmSaved(true)
+    } catch (err) {
+      setAlarmError(err.message || 'Could not set budget alarm.')
+    } finally {
+      setAlarmSaving(false)
+    }
+  }
+
   const CustomTooltip = ({ active, payload }) => {
     if (active && payload && payload.length) {
       return (
@@ -215,6 +268,139 @@ export function Dashboard() {
           </motion.div>
         ))}
       </div>
+
+      {/* Budget Alarm */}
+      <motion.div
+        initial={{
+          opacity: 0,
+          y: 10,
+        }}
+        animate={{
+          opacity: 1,
+          y: 0,
+        }}
+        transition={{
+          delay: 0.18,
+        }}
+        className="bg-white rounded-3xl border border-gray-100 shadow-card p-6 mb-6"
+      >
+        <div className="flex flex-col lg:flex-row lg:items-start gap-6">
+          <div className="lg:w-64">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="w-9 h-9 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center">
+                <Bell size={16} />
+              </div>
+              <div>
+                <h3 className="font-bold text-gray-900">Set budget alarm</h3>
+                <p className="text-xs text-gray-500">
+                  Warn me when a category exceeds its cap.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <form
+            onSubmit={handleSetBudgetAlarm}
+            className="flex-1 grid md:grid-cols-[1fr_1fr_auto] gap-3"
+          >
+            <label className="block">
+              <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold">
+                Category
+              </span>
+              <select
+                value={alarmCategory}
+                onChange={(e) => {
+                  setAlarmCategory(e.target.value)
+                  setAlarmSaved(false)
+                  setBudgetCheck(null)
+                  setAlarmError('')
+                }}
+                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100"
+              >
+                {alarmCategoryOptions.map((cat) => (
+                  <option key={cat} value={cat}>
+                    {cat}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="text-[10px] uppercase tracking-wider text-gray-400 font-bold">
+                Alarm amount (VND)
+              </span>
+              <input
+                type="number"
+                min="1000"
+                step="1000"
+                value={alarmAmount}
+                onChange={(e) => {
+                  setAlarmAmount(e.target.value)
+                  setAlarmSaved(false)
+                  setBudgetCheck(null)
+                  setAlarmError('')
+                }}
+                placeholder="e.g. 2000000"
+                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100"
+              />
+            </label>
+
+            <div className="flex md:items-end">
+              <PillButton
+                type="submit"
+                disabled={alarmSaving}
+                className="w-full md:w-auto justify-center"
+              >
+                {alarmSaving ? 'Checking...' : 'Set alarm'}
+              </PillButton>
+            </div>
+          </form>
+        </div>
+
+        <div className="mt-4">
+          {alarmError && (
+            <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl p-3">
+              <AlertTriangle size={14} />
+              {alarmError}
+            </div>
+          )}
+
+          {alarmSaved && selectedCategoryWarning && (
+            <div className="flex items-start gap-3 text-sm bg-red-50 border border-red-100 rounded-xl p-4">
+              <div className="w-8 h-8 rounded-full bg-red-500 text-white flex items-center justify-center flex-shrink-0">
+                <AlertTriangle size={16} />
+              </div>
+              <div>
+                <p className="font-semibold text-red-900">
+                  {alarmCategory} already exceeded this budget alarm.
+                </p>
+                <p className="text-xs text-red-700 mt-1">
+                  Spent {formatVND(selectedCategoryWarning.spent)} / cap{' '}
+                  {formatVND(selectedCategoryWarning.cap_amount)} · over by{' '}
+                  {formatVND(selectedCategoryWarning.over_by)}.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {alarmSaved && !selectedCategoryWarning && (
+            <div className="flex items-start gap-3 text-sm bg-green-50 border border-green-100 rounded-xl p-4">
+              <div className="w-8 h-8 rounded-full bg-green-500 text-white flex items-center justify-center flex-shrink-0">
+                <CheckCircle2 size={16} />
+              </div>
+              <div>
+                <p className="font-semibold text-green-900">
+                  Budget alarm saved for {alarmCategory}.
+                </p>
+                <p className="text-xs text-green-700 mt-1">
+                  Current spending is {formatVND(selectedCategorySpend)}. You will see
+                  a warning after uploads once it exceeds this cap.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </motion.div>
 
       {/* Chart + Insight */}
       <div className="grid lg:grid-cols-3 gap-6 mb-6">

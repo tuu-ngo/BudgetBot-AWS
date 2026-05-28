@@ -38,12 +38,6 @@ class Config:
     # SQS
     sqs_queue_url: str = _env("SQS_QUEUE_URL", "")
 
-    # SNS (budget alerts)
-    sns_topic_arn: str = _env("SNS_TOPIC_ARN", "")
-
-    # Budget Lambda name (for async invoke from Parser Lambda)
-    budget_lambda_name: str = _env("BUDGET_LAMBDA_NAME", "budgetbot-budget-handler")
-
     # Parser Lambda name (for local async invoke simulation — unused in aws mode)
     parser_lambda_name: str = _env("PARSER_LAMBDA_NAME", "budgetbot-parser")
 
@@ -51,7 +45,6 @@ class Config:
     review_threshold: float = float(_env("REVIEW_THRESHOLD", "0.60"))
 
     # Misc
-    default_user_id: str = _env("DEFAULT_USER_ID", "00000000-0000-0000-0000-000000000001")
     log_level: str = _env("LOG_LEVEL", "INFO")
 
     # Frontend serving (set false for split deploy: CloudFront+S3 or Amplify)
